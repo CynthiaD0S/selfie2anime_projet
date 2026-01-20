@@ -1,0 +1,14 @@
+project: selfie2anime_cyclegan
+data_root: data/selfie2anime
+train_size: 256
+batch_size: 1 # Très important : CycleGAN s'entraîne souvent avec un batch de 1 ou 2
+epochs: 1 # Les GANs demandent beaucoup plus d'époques (souvent 100 stables + 100 avec decay)
+lr: 0.0002 # Le standard pour Adam dans les GANs est souvent 0.0002
+model: cycle_gan # On change l'architecture
+gen_model: resnet_9p # Architecture typique du générateur (ou unet_256)
+disc_model: patchgan # Architecture typique du discriminateur
+loss:
+  gan: lsgan # Least Squares GAN est plus stable
+  cycle: 10.0 # Poids de la perte de cycle (L1)
+  identity: 5.0 # Aide à préserver les couleurs d'origine
+mixed_precision: true

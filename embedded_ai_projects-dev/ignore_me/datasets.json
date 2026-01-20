@@ -1,0 +1,94 @@
+{
+  "projects": {
+    "1": {
+      "name": "Low-light enhancement (paired)",
+      "dataset_link": "https://daooshee.github.io/BMVC2018website/",
+      "suggested_models": [
+        "Tiny U-Net (base=16)",
+        "ResNet-9"
+      ],
+      "difficulty": "easy"
+    },
+    "2": {
+      "name": "Image denoising (paired)",
+      "dataset_link": "https://www.eecs.yorku.ca/~kamel/sidd/",
+      "suggested_models": [
+        "DnCNN (17 layers)",
+        "Tiny U-Net (base=16)"
+      ],
+      "difficulty": "easy"
+    },
+    "3": {
+      "name": "Super-resolution x2 (paired via synthetic LR)",
+      "dataset_link": "https://data.vision.ee.ethz.ch/cvl/DIV2K/",
+      "suggested_models": [
+        "FSRCNN-x2",
+        "ESPCN-x2"
+      ],
+      "difficulty": "easy"
+    },
+    "4": {
+      "name": "Frame interpolation x2 (triplet)",
+      "dataset_link": "http://toflow.csail.mit.edu/",
+      "suggested_models": [
+        "U-Net small",
+        "SepConv-lite"
+      ],
+      "difficulty": "hard"
+    },
+    "5": {
+      "name": "Person segmentation -> background blur/replace (segmentation)",
+      "dataset_link": "https://cocodataset.org/#download",
+      "suggested_models": [
+        "Fast-SCNN",
+        "BiSeNet-lite"
+      ],
+      "difficulty": "medium"
+    },
+    "6": {
+      "name": "Makeup transfer (image-to-image translation)",
+      "dataset_link": "https://github.com/wtjiang98/PSGAN",
+      "suggested_models": [
+        "ResNet-6 generator",
+        "U-Net small"
+      ],
+      "difficulty": "medium"
+    },
+    "7": {
+      "name": "Add hats/glasses via Mask->Photo (pix2pix)",
+      "dataset_link": "https://github.com/switchablenorms/CelebAMask-HQ",
+      "suggested_models": [
+        "pix2pix U-Net small",
+        "ResNet-6 generator"
+      ],
+      "difficulty": "medium"
+    },
+    "8": {
+      "name": "Edge->Portrait (pix2pix)",
+      "dataset_link": "https://github.com/NVlabs/ffhq-dataset",
+      "suggested_models": [
+        "pix2pix U-Net small",
+        "ResNet-6 generator"
+      ],
+      "difficulty": "medium"
+    },
+    "9": {
+      "name": "Night->Day translation (unpaired)",
+      "dataset_link": "http://efrosgans.eecs.berkeley.edu/cyclegan/datasets/",
+      "suggested_models": [
+        "CycleGAN ResNet-6",
+        "Tiny U-Net (paired variant)"
+      ],
+      "difficulty": "hard"
+    },
+    "10": {
+      "name": "Selfie->Anime / Cartoon (unpaired)",
+      "dataset_link": "https://github.com/taki0112/UGATIT",
+      "suggested_models": [
+        "CycleGAN ResNet-6",
+        "U-Net small"
+      ],
+      "difficulty": "hard"
+    }
+  }
+}

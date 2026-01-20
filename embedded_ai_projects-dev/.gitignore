@@ -1,0 +1,4 @@
+/.idea/
+/data/*
+!/data/dataset_example/
+!/data/dataset_example/**
