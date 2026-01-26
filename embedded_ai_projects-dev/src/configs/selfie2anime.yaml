@@ -1,8 +1,10 @@
 project: selfie2anime_cyclegan
 data_root: data/selfie2anime
-train_size: 64
-batch_size: 1
-epochs: 1
-lr: 0.0002
+image_size: 256
+batch_size: 4 # Petit batch pour Jetson
+epochs: 50
+lr_g: 0.0002
+lr_d: 0.0001
 lambda_cycle: 10.0
-mixed_precision: false # true seulement sur GPU
+lambda_identity: 0.5
+model: cyclegan_resnet6

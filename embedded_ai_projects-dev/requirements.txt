@@ -1,3 +1,1 @@
-torch
-matplotlib
-opencv-python
+PyYAML==6.0.3
