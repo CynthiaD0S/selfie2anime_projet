@@ -13,23 +13,23 @@ import numpy as np
 from PIL import Image
 import sys
 import os
+import traceback
+
+# ✅ Progress bar (Windows terminal friendly)
+from tqdm import tqdm
 
 # Add src to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC_DIR)
 
-
-import traceback
-
 try:
     from datasets.unpaired import create_dataloader
     from models.gan_generator import create_generator, create_discriminator
-except Exception as e:
+except Exception:
     print("IMPORT ERROR DETAILS:")
     traceback.print_exc()
     sys.exit(1)
-
 
 
 def set_seed(seed: int):
@@ -80,7 +80,7 @@ def save_samples_oneway(G, dataloader, device, epoch, output_dir, num_samples=4)
 
 
 def load_config(config_path):
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -109,14 +109,11 @@ def train_oneway(config):
     seed = int(config.get("seed", 42))
     num_workers = int(config.get("num_workers", 0))
 
-    # ============
-    # ✅ HARD CODE: save every 20 epochs (checkpoints + samples)
-    # ============
+    # ✅ Save every 20 epochs (checkpoints + samples)
     save_interval = 20
     sample_interval = 20
 
     # Identity loss (stabilize)
-    # If too strong, reduce it (e.g. 0.1) or disable (0.0)
     lambda_identity = float(config.get("lambda_identity", 0.2))
 
     # Device
@@ -165,8 +162,12 @@ def train_oneway(config):
     optimizer_D = optim.Adam(D_B.parameters(), lr=lr_d, betas=(beta1, 0.999))
 
     # LR schedulers (linear decay)
-    scheduler_G = optim.lr_scheduler.LambdaLR(optimizer_G, lr_lambda=lambda e: 1.0 - e / epochs)
-    scheduler_D = optim.lr_scheduler.LambdaLR(optimizer_D, lr_lambda=lambda e: 1.0 - e / epochs)
+    scheduler_G = optim.lr_scheduler.LambdaLR(
+        optimizer_G, lr_lambda=lambda e: 1.0 - e / epochs
+    )
+    scheduler_D = optim.lr_scheduler.LambdaLR(
+        optimizer_D, lr_lambda=lambda e: 1.0 - e / epochs
+    )
 
     # TensorBoard
     writer = SummaryWriter(log_dir=str(output_dir))
@@ -175,7 +176,10 @@ def train_oneway(config):
 
     print(f"\nStarting training for {epochs} epochs (one-way)...")
 
-    for epoch in range(1, epochs + 1):
+    # ✅ Progress bar on epochs (Windows terminal friendly)
+    pbar_epochs = tqdm(range(1, epochs + 1), desc="Epochs", unit="epoch")
+
+    for epoch in pbar_epochs:
         G.train()
         D_B.train()
 
@@ -183,7 +187,16 @@ def train_oneway(config):
         epoch_loss_D = 0.0
         epoch_loss_id = 0.0
 
-        for batch_idx, (real_A, real_B) in enumerate(train_loader):
+        # ✅ Progress bar on batches
+        pbar_batches = tqdm(
+            enumerate(train_loader),
+            total=len(train_loader),
+            desc=f"Epoch {epoch}/{epochs}",
+            unit="batch",
+            leave=False,  # keep terminal clean on Windows
+        )
+
+        for batch_idx, (real_A, real_B) in pbar_batches:
             real_A = real_A.to(device)  # selfies
             real_B = real_B.to(device)  # anime
 
@@ -196,7 +209,7 @@ def train_oneway(config):
             out_fake = D_B(fake_B)
             loss_G_gan = criterion_gan(out_fake, torch.ones_like(out_fake))
 
-            # Identity (optional): G(real_B) should be ~ real_B (helps preserve color/style)
+            # Identity (optional): G(real_B) should be ~ real_B
             loss_id = torch.tensor(0.0, device=device)
             if lambda_identity > 0:
                 same_B = G(real_B)
@@ -223,13 +236,14 @@ def train_oneway(config):
 
             epoch_loss_G += loss_G.item()
             epoch_loss_D += loss_D.item()
-            epoch_loss_id += loss_id.item() if isinstance(loss_id, torch.Tensor) else float(loss_id)
+            epoch_loss_id += loss_id.item()
 
-            if batch_idx % 50 == 0:
-                print(
-                    f"Epoch {epoch}, Batch {batch_idx}: "
-                    f"G={loss_G.item():.4f}, D={loss_D.item():.4f}, id={loss_id.item():.4f}"
-                )
+            # ✅ Live update on batch bar
+            pbar_batches.set_postfix(
+                G=f"{loss_G.item():.4f}",
+                D=f"{loss_D.item():.4f}",
+                id=f"{loss_id.item():.4f}",
+            )
 
         # Averages
         n = max(1, len(train_loader))
@@ -250,6 +264,9 @@ def train_oneway(config):
         writer.add_scalar("Loss/D", avg_D, epoch)
         writer.add_scalar("Loss/Identity", avg_id, epoch)
         writer.add_scalar("LR/G", scheduler_G.get_last_lr()[0], epoch)
+
+        # ✅ Live update on epoch bar
+        pbar_epochs.set_postfix(G=f"{avg_G:.4f}", D=f"{avg_D:.4f}", id=f"{avg_id:.4f}")
 
         print(f"\nEpoch {epoch}/{epochs}: G={avg_G:.4f}, D={avg_D:.4f}, id={avg_id:.4f}")
 
@@ -280,7 +297,7 @@ def train_oneway(config):
     # Final
     torch.save({"G_state_dict": G.state_dict(), "config": config}, output_dir / "model_G_last.pt")
 
-    with open(output_dir / "train_metrics.json", "w") as f:
+    with open(output_dir / "train_metrics.json", "w", encoding="utf-8") as f:
         json.dump(losses_history, f, indent=2)
 
     writer.close()
