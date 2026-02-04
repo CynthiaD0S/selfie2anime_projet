@@ -2,3 +2,8 @@
 /data/*
 !/data/dataset_example/
 !/data/dataset_example/**
+# Ignorer les dossiers de résultats et de logs
+runs/
+outputs/
+*.pt
+*.txt
