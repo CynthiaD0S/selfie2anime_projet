@@ -1,10 +1,23 @@
-project: selfie2anime_cyclegan
-data_root: data/selfie2anime
-image_size: 256
-batch_size: 4 # Petit batch pour Jetson
-epochs: 50
+# selfie2anime_oneway.yaml
+project: "Selfie2Anime_OneWayGAN"
+data_root: "data/selfie2anime"
+checkpoint_dir: "runs/oneway_gan_v1"
+
+# Modèle
+generator_type: "resnet9" # resnet6, resnet9, unet_small
+train_size: 256
+
+# Entraînement
+epochs: 200
+batch_size: 1
 lr_g: 0.0002
-lr_d: 0.0001
-lambda_cycle: 10.0
-lambda_identity: 0.5
-model: cyclegan_resnet6
+lr_d: 0.0002
+beta1: 0.5
+
+# Stabilisation (utilisé par le one-way)
+lambda_identity: 0.2
+
+# Logistique
+num_workers: 0
+augment: True
+seed: 42

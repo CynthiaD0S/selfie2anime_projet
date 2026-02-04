@@ -1,128 +1,308 @@
-import os
+#!/usr/bin/env python3
 import argparse
-import yaml
-import torch
-import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+import json
 from pathlib import Path
-import shutil
+import random
+import yaml
 
-# Imports locaux
-from models import Generator, Discriminator
-from datasets import create_dataloader
+import torch
+from torch import nn
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
+import numpy as np
+from PIL import Image
+import sys
+import os
 
-def train(config_path):
-    # --- 1. CHARGEMENT CONFIG ---
-    with open(config_path, 'r') as f:
-        cfg = yaml.safe_load(f)
+# Add src to path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+sys.path.insert(0, SRC_DIR)
 
-    # Détection automatique du matériel
+
+import traceback
+
+try:
+    from datasets.unpaired import create_dataloader
+    from models.gan_generator import create_generator, create_discriminator
+except Exception as e:
+    print("IMPORT ERROR DETAILS:")
+    traceback.print_exc()
+    sys.exit(1)
+
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def tensor_to_pil(t: torch.Tensor) -> Image.Image:
+    """t: (C,H,W) in [-1,1]"""
+    img = t.detach().cpu().numpy()
+    img = (img + 1.0) / 2.0
+    img = np.clip(img, 0, 1)
+    img = np.transpose(img, (1, 2, 0))
+    img = (img * 255).astype(np.uint8)
+    return Image.fromarray(img)
+
+
+@torch.no_grad()
+def save_samples_oneway(G, dataloader, device, epoch, output_dir, num_samples=4):
+    """
+    Save a small grid:
+    top row: real_A (selfie) | fake_B (anime)
+    """
+    G.eval()
+
+    samples_dir = Path(output_dir) / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+
+    for real_A, real_B in dataloader:
+        real_A = real_A.to(device)[:num_samples]
+        fake_B = G(real_A)
+        break
+
+    for i in range(min(num_samples, real_A.size(0))):
+        im_real = tensor_to_pil(real_A[i])
+        im_fake = tensor_to_pil(fake_B[i])
+
+        w, h = im_real.size
+        grid = Image.new("RGB", (w * 2, h))
+        grid.paste(im_real, (0, 0))
+        grid.paste(im_fake, (w, 0))
+
+        grid.save(samples_dir / f"epoch_{epoch:03d}_sample_{i}.png")
+
+    G.train()
+
+
+def load_config(config_path):
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train One-Way GAN: Selfie -> Anime")
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    return parser.parse_args()
+
+
+def train_oneway(config):
+    # Required
+    data_root = config["data_root"]
+
+    # Output
+    output_dir = Path(config.get("checkpoint_dir", "runs/oneway_gan"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Params
+    epochs = int(config.get("epochs", 100))
+    batch_size = int(config.get("batch_size", 4))
+    image_size = int(config.get("train_size", 256))
+    lr_g = float(config.get("lr_g", 0.0002))
+    lr_d = float(config.get("lr_d", 0.0002))
+    beta1 = float(config.get("beta1", 0.5))
+
+    seed = int(config.get("seed", 42))
+    num_workers = int(config.get("num_workers", 0))
+
+    # ============
+    # ✅ HARD CODE: save every 20 epochs (checkpoints + samples)
+    # ============
+    save_interval = 20
+    sample_interval = 20
+
+    # Identity loss (stabilize)
+    # If too strong, reduce it (e.g. 0.1) or disable (0.0)
+    lambda_identity = float(config.get("lambda_identity", 0.2))
+
+    # Device
+    set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Lancement de l'entraînement sur : {device}")
-    
-    # --- GESTION DU DOSSIER (Solution radicale pour l'erreur FailedPrecondition) ---
-    # On définit un chemin complet et propre
-    base_run_dir = Path.cwd() / "src" / "runs"
-    run_dir = base_run_dir / cfg["project"]
+    print(f"Using device: {device}")
 
-    # Suppression forcée de l'ancien dossier pour éviter le conflit
-    if run_dir.exists():
-        import shutil
-        try:
-            shutil.rmtree(run_dir, ignore_errors=True)
-        except:
-            pass 
+    # Data
+    train_loader = create_dataloader(
+        data_root=data_root,
+        split="train",
+        batch_size=batch_size,
+        size=image_size,
+        shuffle=True,
+        num_workers=num_workers,
+        augment=config.get("augment", True),
+    )
 
-    # Création manuelle du dossier avec les outils Python standards
-    run_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"📁 Dossier de logs : {run_dir.absolute()}")
+    val_loader = create_dataloader(
+        data_root=data_root,
+        split="val",
+        batch_size=min(4, batch_size),
+        size=image_size,
+        shuffle=False,
+        num_workers=num_workers,
+        augment=False,
+    )
 
-    # On essaie de lancer le Writer. Si ça plante encore, on s'en passe pour le test.
-    try:
-        writer = SummaryWriter(log_dir=str(run_dir.absolute()))
-    except Exception as e:
-        print(f"⚠️ TensorBoard n'a pas pu démarrer ({e}), on continue sans...")
-        writer = None
+    print(f"Train samples: {len(train_loader.dataset)}")
+    print(f"Val samples:   {len(val_loader.dataset)}")
 
-    # --- 2. MODÈLES & OPTIMISEURS ---
-    g_a2b = Generator().to(device)
-    g_b2a = Generator().to(device)
-    d_a = Discriminator().to(device)
-    d_b = Discriminator().to(device)
+    # Models: ONLY A->B and D_B
+    generator_type = config.get("generator_type", "resnet6")
+    G = create_generator(generator_type).to(device)       # Selfie -> Anime
+    D_B = create_discriminator().to(device)               # Real Anime vs Fake Anime
 
-    opt_g = torch.optim.Adam(list(g_a2b.parameters()) + list(g_b2a.parameters()), lr=cfg["lr"], betas=(0.5, 0.999))
-    opt_d = torch.optim.Adam(list(d_a.parameters()) + list(d_b.parameters()), lr=cfg["lr"], betas=(0.5, 0.999))
+    print(f"G parameters:   {sum(p.numel() for p in G.parameters()):,}")
+    print(f"D_B parameters: {sum(p.numel() for p in D_B.parameters()):,}")
 
+    # Losses (LSGAN)
     criterion_gan = nn.MSELoss()
-    criterion_cycle = nn.L1Loss()
+    criterion_id = nn.L1Loss()
 
-    # Mixed Precision : Uniquement si CUDA est présent
-    use_amp = torch.cuda.is_available()
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    # Optims
+    optimizer_G = optim.Adam(G.parameters(), lr=lr_g, betas=(beta1, 0.999))
+    optimizer_D = optim.Adam(D_B.parameters(), lr=lr_d, betas=(beta1, 0.999))
 
-    # --- 3. DATALOADER ---
-    # Pour le test sur CPU, on utilise num_workers=0 pour éviter des erreurs Windows
-    train_loader = create_dataloader(cfg["data_root"], "train", batch_size=cfg["batch_size"], size=cfg["train_size"], num_workers=0)
+    # LR schedulers (linear decay)
+    scheduler_G = optim.lr_scheduler.LambdaLR(optimizer_G, lr_lambda=lambda e: 1.0 - e / epochs)
+    scheduler_D = optim.lr_scheduler.LambdaLR(optimizer_D, lr_lambda=lambda e: 1.0 - e / epochs)
 
-    # --- 4. BOUCLE D'ENTRAÎNEMENT ---
-    epochs = 1 # On force à 1 pour ton test
-    for epoch in range(epochs):
-        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
-        for i, batch in enumerate(loop):
-            real_a = batch["A"].to(device)
-            real_b = batch["B"].to(device)
+    # TensorBoard
+    writer = SummaryWriter(log_dir=str(output_dir))
 
-            # --- GÉNÉRATEURS ---
-            # On utilise autocast seulement si le GPU est là
-            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-                fake_b = g_a2b(real_a)
-                fake_a = g_b2a(real_b)
-                
-                # Perte GAN
-                loss_gan = criterion_gan(d_b(fake_b), torch.ones_like(d_b(fake_b))) + \
-                           criterion_gan(d_a(fake_a), torch.ones_like(d_a(fake_a)))
-                
-                # Perte Cycle
-                loss_cycle = (criterion_cycle(g_b2a(fake_b), real_a) + \
-                              criterion_cycle(g_a2b(fake_a), real_b)) * 10.0
-                
-                loss_g = loss_gan + loss_cycle
+    losses_history = {"G": [], "D": [], "id": []}
 
-            opt_g.zero_grad()
-            if scaler:
-                scaler.scale(loss_g).backward()
-                scaler.step(opt_g)
-            else:
-                loss_g.backward()
-                opt_g.step()
+    print(f"\nStarting training for {epochs} epochs (one-way)...")
 
-            # --- DISCRIMINATEURS ---
-            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-                loss_d = (criterion_gan(d_a(real_a), torch.ones_like(d_a(real_a))) + \
-                          criterion_gan(d_a(fake_a.detach()), torch.zeros_like(d_a(fake_a.detach()))) + \
-                          criterion_gan(d_b(real_b), torch.ones_like(d_b(real_b))) + \
-                          criterion_gan(d_b(fake_b.detach()), torch.zeros_like(d_b(fake_b.detach())))) / 2
-            
-            opt_d.zero_grad()
-            if scaler:
-                scaler.scale(loss_d).backward()
-                scaler.step(opt_d)
-                scaler.update()
-            else:
-                loss_d.backward()
-                opt_d.step()
+    for epoch in range(1, epochs + 1):
+        G.train()
+        D_B.train()
 
-            # Mise à jour de la barre de progression
-            loop.set_postfix(loss_g=loss_g.item(), loss_d=loss_d.item())
+        epoch_loss_G = 0.0
+        epoch_loss_D = 0.0
+        epoch_loss_id = 0.0
 
-        # Sauvegarde de fin de test
-        torch.save(g_a2b.state_dict(), run_dir / "last_test.pt")
-        print(f"✅ Test réussi ! Modèle sauvegardé dans {run_dir}")
+        for batch_idx, (real_A, real_B) in enumerate(train_loader):
+            real_A = real_A.to(device)  # selfies
+            real_B = real_B.to(device)  # anime
+
+            # -------------------------
+            # Train Generator G (A->B)
+            # -------------------------
+            optimizer_G.zero_grad()
+
+            fake_B = G(real_A)
+            out_fake = D_B(fake_B)
+            loss_G_gan = criterion_gan(out_fake, torch.ones_like(out_fake))
+
+            # Identity (optional): G(real_B) should be ~ real_B (helps preserve color/style)
+            loss_id = torch.tensor(0.0, device=device)
+            if lambda_identity > 0:
+                same_B = G(real_B)
+                loss_id = criterion_id(same_B, real_B) * lambda_identity
+
+            loss_G = loss_G_gan + loss_id
+            loss_G.backward()
+            optimizer_G.step()
+
+            # -------------------------
+            # Train Discriminator D_B
+            # -------------------------
+            optimizer_D.zero_grad()
+
+            out_real = D_B(real_B)
+            loss_D_real = criterion_gan(out_real, torch.ones_like(out_real))
+
+            out_fake_det = D_B(fake_B.detach())
+            loss_D_fake = criterion_gan(out_fake_det, torch.zeros_like(out_fake_det))
+
+            loss_D = 0.5 * (loss_D_real + loss_D_fake)
+            loss_D.backward()
+            optimizer_D.step()
+
+            epoch_loss_G += loss_G.item()
+            epoch_loss_D += loss_D.item()
+            epoch_loss_id += loss_id.item() if isinstance(loss_id, torch.Tensor) else float(loss_id)
+
+            if batch_idx % 50 == 0:
+                print(
+                    f"Epoch {epoch}, Batch {batch_idx}: "
+                    f"G={loss_G.item():.4f}, D={loss_D.item():.4f}, id={loss_id.item():.4f}"
+                )
+
+        # Averages
+        n = max(1, len(train_loader))
+        avg_G = epoch_loss_G / n
+        avg_D = epoch_loss_D / n
+        avg_id = epoch_loss_id / n
+
+        # Schedulers
+        scheduler_G.step()
+        scheduler_D.step()
+
+        # Logs
+        losses_history["G"].append(avg_G)
+        losses_history["D"].append(avg_D)
+        losses_history["id"].append(avg_id)
+
+        writer.add_scalar("Loss/G", avg_G, epoch)
+        writer.add_scalar("Loss/D", avg_D, epoch)
+        writer.add_scalar("Loss/Identity", avg_id, epoch)
+        writer.add_scalar("LR/G", scheduler_G.get_last_lr()[0], epoch)
+
+        print(f"\nEpoch {epoch}/{epochs}: G={avg_G:.4f}, D={avg_D:.4f}, id={avg_id:.4f}")
+
+        # ✅ Save samples every 20 epochs
+        if epoch % sample_interval == 0:
+            save_samples_oneway(G, val_loader, device, epoch, output_dir, num_samples=4)
+            print(f"  ✓ Saved samples for epoch {epoch}")
+
+        # ✅ Save checkpoint every 20 epochs
+        if epoch % save_interval == 0 or epoch == epochs:
+            ckpt = {
+                "epoch": epoch,
+                "G_state_dict": G.state_dict(),
+                "D_B_state_dict": D_B.state_dict(),
+                "optimizer_G_state_dict": optimizer_G.state_dict(),
+                "optimizer_D_state_dict": optimizer_D.state_dict(),
+                "losses": losses_history,
+                "config": config,
+            }
+            ckpt_path = output_dir / f"epoch_{epoch:03d}.pth"
+            torch.save(ckpt, ckpt_path)
+
+            # Also keep a "latest"
+            torch.save(ckpt, output_dir / "model_latest.pt")
+
+            print(f"  ✓ Saved checkpoint: {ckpt_path}")
+
+    # Final
+    torch.save({"G_state_dict": G.state_dict(), "config": config}, output_dir / "model_G_last.pt")
+
+    with open(output_dir / "train_metrics.json", "w") as f:
+        json.dump(losses_history, f, indent=2)
+
+    writer.close()
+
+    print("\n✅ Training completed!")
+    print(f"   Output dir: {output_dir}")
+    print(f"   Latest:     {output_dir / 'model_latest.pt'}")
+    print(f"   Final G:    {output_dir / 'model_G_last.pt'}")
+
+
+def main():
+    args = parse_args()
+
+    print("One-Way GAN Training Script (Selfie -> Anime)")
+    print("=" * 60)
+
+    config = load_config(args.config)
+    print(f"Configuration loaded from: {args.config}")
+    print(f"Project: {config.get('project', 'N/A')}")
+
+    train_oneway(config)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    args = parser.parse_args()
-    train(args.config)
+    main()
