@@ -1,141 +1,200 @@
 #!/usr/bin/env python3
 import random
 from pathlib import Path
-
 import torch
 from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
+import numpy as np
 
 try:
     from PIL import Image
-except ImportError:  # pragma: no cover - PIL is optional for the PPM-only example.
-    Image = None
-
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    print("Warning: Pillow non installé. Installer avec: pip install pillow")
 
 DEFAULT_IMAGE_SIZE = 256
 
-
-def _read_with_pil(path):
-    """Read image with PIL and convert to tensor in [0, 1] range"""
-    image = Image.open(path).convert("RGB")
-    # Convert PIL Image to tensor
-    data = torch.ByteTensor(list(image.tobytes()))
-    tensor = data.view(image.height, image.width, 3).permute(2, 0, 1)
-    return tensor.float() / 255.0
-
-
-def _load_image(path, size):
-    """Load and resize image to specified size"""
-    suffix = Path(path).suffix.lower()
+class CycleGANDataset(Dataset):
+    """Dataset unpaired pour CycleGAN (Selfie↔Anime)"""
     
-    # Use PIL for common image formats
-    if Image is not None and suffix in {".png", ".jpg", ".jpeg", ".bmp"}:
-        tensor = _read_with_pil(path)
-    else:
-        raise ValueError(
-            f"Unsupported image format {suffix}. Install Pillow for PNG/JPG support."
-        )
-
-    # Resize if needed
-    if size is not None and (tensor.shape[1] != size or tensor.shape[2] != size):
-        tensor = F.interpolate(
-            tensor.unsqueeze(0),
-            size=(size, size),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)
-    return tensor
-
-
-class UnpairedDataset(Dataset):
-    """Dataset for unpaired image-to-image translation (CycleGAN style)"""
-    
-    def __init__(self, data_root, split, size=DEFAULT_IMAGE_SIZE, augment=False):
+    def __init__(self, data_root, split, size=DEFAULT_IMAGE_SIZE, 
+                 augment=False, normalize=True, aligned_val=False):
+        """
+        Args:
+            data_root: chemin vers dataset (trainA/, trainB/, etc.)
+            split: 'train' ou 'val'
+            size: taille de redimensionnement
+            augment: appliquer des augmentations (seulement en train)
+            normalize: normaliser de [0,1] à [-1,1] (recommandé pour GANs)
+            aligned_val: en validation, prendre A et B alignés si possible
+        """
         self.data_root = Path(data_root)
-        self.split = split
         self.size = size
-        self.augment = augment
+        self.augment = augment and (split == "train")
+        self.normalize = normalize
+        self.aligned_val = aligned_val
+        
+        phase = "train" if split == "train" else "val"
+        
+        self.dir_A = self.data_root / f"{phase}A"
+        self.dir_B = self.data_root / f"{phase}B"
+        
+        # Chercher images
+        extensions = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.JPG", "*.JPEG", "*.PNG")
+        self.path_A = []
+        self.path_B = []
+        
+        for ext in extensions:
+            self.path_A.extend(self.dir_A.glob(ext))
+            self.path_B.extend(self.dir_B.glob(ext))
+        
+        self.path_A = sorted(self.path_A)
+        self.path_B = sorted(self.path_B)
+        
+        if not self.path_A:
+            raise FileNotFoundError(f"Aucune image trouvée dans {self.dir_A}")
+        if not self.path_B:
+            raise FileNotFoundError(f"Aucune image trouvée dans {self.dir_B}")
+            
+        print(f"[Dataset {phase}] Selfies: {len(self.path_A)}, Anime: {len(self.path_B)}")
 
-        # Determine folders based on split
-        if split == "train":
-            self.dir_A = self.data_root / "trainA"
-            self.dir_B = self.data_root / "trainB"
-        elif split == "val":
-            # Try val folders first, fallback to train
-            val_A = self.data_root / "valA"
-            val_B = self.data_root / "valB"
-            self.dir_A = val_A if val_A.exists() else self.data_root / "trainA"
-            self.dir_B = val_B if val_B.exists() else self.data_root / "trainB"
-        else:
-            raise ValueError(f"Invalid split: {split}")
-
-        # Collect image paths
-        self.paths_A = sorted(list(self.dir_A.glob("*")))
-        self.paths_B = sorted(list(self.dir_B.glob("*")))
-
-        # Filter for supported image files
-        self.paths_A = [p for p in self.paths_A 
-                       if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}]
-        self.paths_B = [p for p in self.paths_B 
-                       if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}]
-
-        if not self.paths_A or not self.paths_B:
-            raise FileNotFoundError(
-                f"No images found in {self.dir_A} or {self.dir_B}"
-            )
+    def _load_image(self, path):
+        """Charge et redimensionne une image"""
+        if not HAS_PIL:
+            raise ImportError("Pillow requis: pip install pillow")
+            
+        # Chargement avec PIL
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            
+            # Convertir en numpy puis tensor (plus rapide que l'ancienne méthode)
+            arr = np.array(img, dtype=np.float32) / 255.0
+            
+            # Redimensionner si nécessaire
+            if arr.shape[0] != self.size or arr.shape[1] != self.size:
+                from PIL import Image as PILImage
+                img_resized = img.resize((self.size, self.size), PILImage.BILINEAR)
+                arr = np.array(img_resized, dtype=np.float32) / 255.0
+            
+            tensor = torch.from_numpy(arr).permute(2, 0, 1)  # HWC -> CHW
+        
+        return tensor
 
     def __len__(self):
-        # Return max length to ensure we can iterate through all images
-        return max(len(self.paths_A), len(self.paths_B))
+        return max(len(self.path_A), len(self.path_B))
 
     def __getitem__(self, idx):
-        # Get image from domain A (using modulo to handle different lengths)
-        path_A = self.paths_A[idx % len(self.paths_A)]
-        img_A = _load_image(path_A, self.size)
-
-        # Get image from domain B (random for unpaired, except maybe in validation)
-        if self.split == "val" and idx < min(len(self.paths_A), len(self.paths_B)):
-            # For validation, use corresponding index when possible
-            path_B = self.paths_B[idx % len(self.paths_B)]
-        else:
-            # For training, random sampling (unpaired)
-            path_B = random.choice(self.paths_B)
+        # Domaine A (Selfie)
+        idx_a = idx % len(self.path_A)
+        file_A = self.path_A[idx_a]
+        img_A = self._load_image(file_A)
         
-        img_B = _load_image(path_B, self.size)
-
-        # Basic augmentation: horizontal flip
-        if self.augment and random.random() < 0.5:
-            img_A = torch.flip(img_A, dims=[2])
-            img_B = torch.flip(img_B, dims=[2])
-
-        # Return both images
-        return img_A, img_B
-
+        # Domaine B (Anime)
+        if not self.augment and self.aligned_val and idx < min(len(self.path_A), len(self.path_B)):
+            # Pour validation: prendre même index si possible
+            file_B = self.path_B[idx % len(self.path_B)]
+        else:
+            # Pour entraînement: aléatoire
+            file_B = random.choice(self.path_B)
+        
+        img_B = self._load_image(file_B)
+        
+        # Augmentations
+        if self.augment:
+            if random.random() < 0.5:
+                img_A = torch.flip(img_A, dims=[2])
+                img_B = torch.flip(img_B, dims=[2])
+            # Ajouter d'autres augmentations si besoin:
+            # if random.random() < 0.3:
+            #     brightness = random.uniform(0.8, 1.2)
+            #     img_A = torch.clamp(img_A * brightness, 0, 1)
+        
+        # Normalisation pour GAN
+        if self.normalize:
+            img_A = img_A * 2 - 1  # [0,1] -> [-1,1]
+            img_B = img_B * 2 - 1
+        
+        return {
+            "A": img_A,      # Selfie
+            "B": img_B,      # Anime
+            "path_A": str(file_A),
+            "path_B": str(file_B)
+        }
 
 def create_dataloader(
     data_root,
-    split,
-    batch_size=4,
+    split="train",
+    batch_size=1,
     size=DEFAULT_IMAGE_SIZE,
-    shuffle=True,
-    num_workers=0,
+    shuffle=None,
+    num_workers=0,  # Sur Jetson, souvent 0 pour éviter les problèmes
     augment=None,
+    normalized=True,
+    **kwargs
 ):
-    """Create DataLoader for unpaired dataset"""
+    """
+    Crée un DataLoader pour CycleGAN
+    """
+    if shuffle is None:
+        shuffle = (split == "train")
+    
     if augment is None:
-        augment = split == "train"
-
-    dataset = UnpairedDataset(
+        augment = (split == "train")
+    
+    dataset = CycleGANDataset(
         data_root=data_root,
         split=split,
         size=size,
         augment=augment,
+        normalize=normalized,
+        **kwargs
     )
     
-    return DataLoader(
+    # Sur Jetson: num_workers=0 souvent plus stable
+    # Sur PC: vous pouvez mettre 4-8 selon votre CPU
+    loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        drop_last=(split == "train")  # Important pour GANs
     )
+    
+    return loader
+
+
+# Test du dataloader
+if __name__ == "__main__":
+    # Test minimal
+    import sys
+    
+    # Remplacez par votre chemin
+    TEST_PATH = "data/selfie2anime"  # ou votre structure
+    
+    try:
+        loader = create_dataloader(
+            data_root=TEST_PATH,
+            split="train",
+            batch_size=4,
+            size=256,
+            shuffle=True,
+            num_workers=0
+        )
+        
+        batch = next(iter(loader))
+        print("✓ Dataloader fonctionnel!")
+        print(f"  Batch shape A: {batch['A'].shape}")
+        print(f"  Batch shape B: {batch['B'].shape}")
+        print(f"  Range A: [{batch['A'].min():.3f}, {batch['A'].max():.3f}]")
+        print(f"  Range B: [{batch['B'].min():.3f}, {batch['B'].max():.3f}]")
+        
+    except Exception as e:
+        print(f"✗ Erreur: {e}")
+        print("Structure attendue:")
+        print(f"  {TEST_PATH}/trainA/*.jpg")
+        print(f"  {TEST_PATH}/trainB/*.jpg")
+        print(f"  {TEST_PATH}/valA/*.jpg (optionnel)")
+        print(f"  {TEST_PATH}/valB/*.jpg (optionnel)")
+        sys.exit(1)
