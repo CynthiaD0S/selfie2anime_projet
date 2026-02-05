@@ -1,23 +1,47 @@
-# selfie2anime_oneway.yaml
-project: "Selfie2Anime_OneWayGAN"
-data_root: "data/selfie2anime"
-checkpoint_dir: "runs/oneway_gan_v1"
+# CycleGAN configuration for Selfie to Anime translation
+project: selfie2anime_cyclegan
+data_root: data/selfie2anime
 
-# Modèle
-generator_type: "resnet9" # resnet6, resnet9, unet_small
-train_size: 256
+# Model architecture
+model: cyclegan_resnet6 # Using ResNet-6 generator (lightweight)
+generator_type: resnet6 # Options: resnet6, resnet9, unet_small
+discriminator_type: patchgan # PatchGAN discriminator
 
-# Entraînement
-epochs: 200
-batch_size: 1
-lr_g: 0.0002
-lr_d: 0.0002
-beta1: 0.5
+# Training parameters
+train_size: 256 # Image size for training
+batch_size: 4 # Adjust based on GPU memory (4-8 for desktop GPU)
+epochs: 100 # CycleGAN needs more epochs (50-200)
+lr_g: 0.0002 # Generator learning rate (standard for Adam)
+lr_d: 0.0001 # Discriminator learning rate
+beta1: 0.5 # Adam beta1 parameter
 
-# Stabilisation (utilisé par le one-way)
-lambda_identity: 0.2
+# Loss weights (CycleGAN specific)
+lambda_cycle: 10.0 # Cycle consistency loss weight
+lambda_identity: 0.2 # Identity loss weight (helps preserve colors)
 
-# Logistique
-num_workers: 0
-augment: True
-seed: 42
+# Optimization
+mixed_precision: true # Use FP16 for faster training (if GPU supports it)
+gradient_accumulation: 1 # Number of steps for gradient accumulation
+
+# Data augmentation
+augment: true # Apply random horizontal flip
+
+# Validation and saving
+val_interval: 5 # Validate every N epochs
+save_interval: 10 # Save checkpoint every N epochs
+
+# Checkpoint directories
+checkpoint_dir: runs/selfie2anime
+sample_dir: samples/selfie2anime
+log_dir: logs/selfie2anime
+
+# Dataset specific
+num_workers: 4 # Data loading workers (4 for desktop, 0 for Jetson)
+pin_memory: true # Faster data transfer to GPU
+
+data:
+  train_A: "data/selfie2anime/trainA"
+  train_B: "data/selfie2anime/trainB"
+  test_A: "data/selfie2anime/valA"
+  test_B: "data/selfie2anime/valB"
+  image_size: 256
